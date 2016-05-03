@@ -25,6 +25,6 @@ Usage
                             Filename to deploy when using "--op deploy"
       --deploy-target DEPLOY_TARGET
                             TargetName (find targets using --op targets, e.g.
-                            jsonpath "/servers/mule01" or "groups/mule") when
+                            "servers/mule01" or "groups/mule") when
                             using "--op deploy"
       --debug
