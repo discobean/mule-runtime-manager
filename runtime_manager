@@ -1,0 +1,278 @@
+#!/usr/bin/env python
+import requests, json, sys, argparse, traceback
+
+# A _quick_ hack of a cli wrapper for mulesoft runtime manager for anypoint API
+# Lets you view some info as well as deploy packages/zips
+# No real error catching
+# Use at your own risk
+# Don't put password in the cli
+
+def main():
+    parser = argparse.ArgumentParser(description='Deploy a mule application (zip) to an environment')
+
+    parser.add_argument('--username', help='Anypoint Username')
+    parser.add_argument('--password', help='Anypoint Password')
+    parser.add_argument('--env', help='Environment (default Production)', default='Production')
+    parser.add_argument('--op', help='Operation to run [servers|groups|clusters|applications|targets|deploy]', default='deploy')
+    parser.add_argument('--deploy-artifactname', help='Artifact name to deploy when using "--op deploy"')
+    parser.add_argument('--deploy-file', help='Filename to deploy when using "--op deploy"')
+    parser.add_argument('--deploy-target', help='TargetName (find targets using --op targets, e.g. "servers/mule01" or "groups/mule") when using "--op deploy"', default='mule-40')
+    parser.add_argument('--debug', action='store_true', default=False)
+
+    args = parser.parse_args()
+
+    # First get the required arguments for all operations
+
+    # 1. validate the username and password
+    access_token = runtime_login(args.username, args.password)
+
+    # 2. then get the organisation_id
+    organisation_id = runtime_organisation_id(access_token)
+
+    # 3. Then get the environment_id of the environment we are itnerested in
+    environment_id = runtime_environment(access_token, organisation_id, args.env)
+
+    if args.debug:
+        print >> sys.stderr, "Authorization:", access_token
+        print >> sys.stderr, "X-ANYPNT-ORG-ID:", organisation_id
+        print >> sys.stderr, "X-ANYPNT-ENV-ID:", environment_id
+
+    if args.op == 'servers':
+        servers = runtime_servers(access_token, organisation_id, environment_id)
+        print json.dumps(servers, sort_keys=True, indent=4, separators=(',', ': '))
+        return
+
+    if args.op == 'clusters':
+        clusters = runtime_clusters(access_token, organisation_id, environment_id)
+        print json.dumps(clusters, sort_keys=True, indent=4, separators=(',', ': '))
+        return
+
+    if args.op == 'groups':
+        groups = runtime_groups(access_token, organisation_id, environment_id)
+        print json.dumps(groups, sort_keys=True, indent=4, separators=(',', ': '))
+        return
+
+    if args.op == 'targets':
+        targets = runtime_targets(access_token, organisation_id, environment_id)
+        print json.dumps(targets, sort_keys=True, indent=4, separators=(',', ': '))
+        return
+
+    if args.op == 'applications':
+        applications = runtime_applications(access_token, organisation_id, environment_id)
+        print json.dumps(applications, sort_keys=True, indent=4, separators=(',', ': '))
+        return
+
+    if args.op == 'deploy':
+        if args.deploy_artifactname is None:
+            print >> sys.stderr, "--deploy-artifactname required"
+            sys.exit(1)
+            
+        if args.deploy_file is None:
+            print >> sys.stderr, "--deploy-file required"
+            sys.exit(1)
+
+        if args.deploy_target is None:
+            print >> sys.stderr, "--deploy-target required"
+            sys.exit(1)
+
+        # get the target ID from the name
+        target_id = runtime_get_target_id(access_token, organisation_id, environment_id, args.deploy_target)
+
+        # now we have the right target to deploy deploy it
+        result = runtime_deploy(access_token, organisation_id, environment_id, target_id, args.deploy_artifactname, args.deploy_file)
+        print json.dumps(result, sort_keys=True, indent=4, separators=(',', ': '))
+        return
+
+# find a target ID from a name
+def runtime_get_target_id(token, organisation, environment, search_name):
+    targets = runtime_targets(token, organisation, environment)
+
+    values = search_name.split('/')
+    group = values[0]
+    name = values[1]
+
+    parents = targets[group]
+    for child in parents:
+        if child['name'] == name:
+            return child['id']
+
+    raise Exception("Couldn't find the JSON key:", name)
+
+def runtime_targets(token, organisation, environment):
+    out = { "servers": [], "clusters": [], "groups": [] }
+
+    servers = runtime_servers(token, organisation, environment)
+    for row in servers['data']:
+        out['servers'].append({ "name": row['name'], "id": row['id'] })
+
+    clusters = runtime_clusters(token, organisation, environment)
+    for row in clusters['data']:
+        out['clusters'].append({ "name": row['name'], "id": row['id'] })
+
+    groups = runtime_groups(token, organisation, environment)
+    for row in groups['data']:
+        out['groups'].append({ "name": row['name'], "id": row['id'] })
+
+    return out
+
+def runtime_deploy(token, organisation, environment, target, artifact_name, filepath):
+    try:
+        url = "https://anypoint.mulesoft.com/hybrid/api/v1/applications"
+
+        headers = { 
+            'authorization': token,
+            'X-ANYPNT-ORG-ID': organisation,
+            'X-ANYPNT-ENV-ID': environment
+            }
+
+        data = {
+            'artifactName': artifact_name,
+            'targetId': target
+        }
+
+        with open(filepath, 'rb') as f:
+            files = { 'file': f }
+            response = requests.post(url, headers=headers, data=data, files=files)
+            return json.loads(response.text)
+
+        print >> sys.stderr, "Failed to open file", filepath
+        sys.exit(1)
+    except:
+        print >> sys.stderr, "Failed to get runtime_deploy"
+        traceback.print_exc(file=sys.stdout)
+        sys.exit(1)
+
+def runtime_environment(token, organisation_id, environment_name):
+    url = "https://anypoint.mulesoft.com/accounts/api/organizations/%s/environments" % organisation_id
+
+    headers = { 'authorization': token }
+    response = requests.request("GET", url, headers=headers)
+
+    response = json.loads(response.text)
+
+    for row in response['data']:
+        if row['name'] == environment_name:
+            return row['id']
+
+    return ''
+
+# Get the account information about the account
+def runtime_organisation_id(token):
+    url = "https://anypoint.mulesoft.com/accounts/api/me"
+
+    headers = { 'authorization': token }
+    response = requests.request("GET", url, headers=headers)
+
+    response = json.loads(response.text)
+    return response['user']['organization']['id']
+
+# Login and get the access token, returns a string with the token
+def runtime_login(username, password):
+    try:
+        url = "https://anypoint.mulesoft.com/accounts/login"
+        data = { 'username': username, 'password': password }
+
+        headers = { 'content-type': "application/json" }
+        response = requests.request("POST", url, data=json.dumps(data), headers=headers)
+        response = json.loads(response.text)
+
+        token = "%s %s" % (response['token_type'], response['access_token'])
+        return token
+    except:
+        print >> sys.stderr, "Failed to login to mulsoft"
+        sys.exit(1)
+        
+
+def runtime_servers(token, organisation, environment):
+    try:
+        url = "https://anypoint.mulesoft.com/hybrid/api/v1/servers"
+
+        headers = { 
+            'content-type': "application/json",
+            'authorization': token,
+            'X-ANYPNT-ORG-ID': organisation,
+            'X-ANYPNT-ENV-ID': environment
+            }
+
+        response = requests.request("GET", url, headers=headers)
+
+        return json.loads(response.text)
+    except:
+        print >> sys.stderr, "Failed to get runtime_servers"
+        sys.exit(1)
+
+def runtime_clusters(token, organisation, environment):
+    try:
+        url = "https://anypoint.mulesoft.com/hybrid/api/v1/clusters"
+
+        headers = { 
+            'content-type': "application/json",
+            'authorization': token,
+            'X-ANYPNT-ORG-ID': organisation,
+            'X-ANYPNT-ENV-ID': environment
+            }
+
+        response = requests.request("GET", url, headers=headers)
+
+        return json.loads(response.text)
+    except:
+        print >> sys.stderr, "Failed to get runtime_clusters"
+        sys.exit(1)
+
+def runtime_groups(token, organisation, environment):
+    try:
+        url = "https://anypoint.mulesoft.com/hybrid/api/v1/serverGroups"
+
+        headers = { 
+            'content-type': "application/json",
+            'authorization': token,
+            'X-ANYPNT-ORG-ID': organisation,
+            'X-ANYPNT-ENV-ID': environment
+            }
+
+        response = requests.request("GET", url, headers=headers)
+
+        return json.loads(response.text)
+    except:
+        print >> sys.stderr, "Failed to get runtime_clusters"
+        sys.exit(1)
+
+def runtime_applications(token, organisation, environment):
+    try:
+        url = "https://anypoint.mulesoft.com/hybrid/api/v1/applications"
+
+        headers = { 
+            'content-type': "application/json",
+            'authorization': token,
+            'X-ANYPNT-ORG-ID': organisation,
+            'X-ANYPNT-ENV-ID': environment
+            }
+
+        response = requests.request("GET", url, headers=headers)
+
+        return json.loads(response.text)
+    except:
+        print >> sys.stderr, "Failed to get runtime_applications"
+        sys.exit(1)
+
+def runtime_applications_deploy(token, organisation, environment):
+    try:
+        url = "https://anypoint.mulesoft.com/hybrid/api/v1/applications"
+
+        headers = { 
+            'content-type': "application/json",
+            'authorization': token,
+            'X-ANYPNT-ORG-ID': organisation,
+            'X-ANYPNT-ENV-ID': environment
+            }
+
+        response = requests.request("GET", url, headers=headers)
+
+        return json.loads(response.text)
+    except:
+        print >> sys.stderr, "Failed to get runtime_applications"
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
+
