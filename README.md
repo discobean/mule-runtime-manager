@@ -28,3 +28,7 @@ Usage
                             "servers/mule01" or "groups/mule") when
                             using "--op deploy"
       --debug
+
+Example Deployment
+
+    ./runtime_manager --username X --password TODOREMOVETHIS --op deploy --deploy-target groups/mule-40 --deploy-artifactname myservice --deploy-file ~/myservice-20160421114430.zip 
